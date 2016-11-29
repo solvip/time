@@ -1,0 +1,2 @@
+:name "time-edts"
+:deps '("_build/default/lib")

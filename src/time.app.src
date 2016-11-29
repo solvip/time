@@ -1,0 +1,16 @@
+{application, time,
+ [{description, ""},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, { time_app, []}},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {maintainers, ["Solvi Pall Asgeirsson <solvip@gmail.com>"]},
+  {licenses, ["http://www.apache.org/licenses/LICENSE-2.0.txt"]},
+  {links, ["https://github.com/solvip/time"]}
+ ]}.

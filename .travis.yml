@@ -6,4 +6,12 @@ otp_release:
 - 19.0
 - 19.1
 - 19.2
+
 script: make all
+
+cache:
+  directories:
+  # Cache the rebar artifacts; primarily we're interested
+  # in storing the dialyer plt so that we don't have to generate
+  # it on every build
+  - $HOME/.cache/rebar3

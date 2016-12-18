@@ -24,6 +24,7 @@
 -type time() :: #time{}.
 -opaque([ time/0 ]).
 
+-type timezone() :: 'UTC'.
 -export_type([ timezone/0 ]).
 
 %% API exports

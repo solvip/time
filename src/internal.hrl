@@ -16,8 +16,6 @@
 %%%
 %%%-------------------------------------------------------------------
 
--type timezone() :: 'UTC'.
-
 -record(time, { nsec = 0     :: integer()
-	      , tz   = 'UTC' :: timezone()
+	      , tz   = 'UTC' :: time:timezone()
 	 }).

@@ -1,0 +1,190 @@
+#!/usr/bin/env escript
+%%% -*- coding: utf-8; mode: erlang -*-
+%%%-------------------------------------------------------------------
+%%% @author Sölvi Páll Ásgeirsson <solvip@gmail.com>
+%%% @copyright (C) 2016, Sölvi Páll Ásgeirsson
+%%%
+%%% Licensed under the Apache License, Version 2.0 (the "License");
+%%% you may not use this file except in compliance with the License.
+%%% You may obtain a copy of the License at
+%%%
+%%%     http://www.apache.org/licenses/LICENSE-2.0
+%%%
+%%% Unless required by applicable law or agreed to in writing, software
+%%% distributed under the License is distributed on an "AS IS" BASIS,
+%%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%%% See the License for the specific language governing permissions and
+%%% limitations under the License.
+%%%
+%%%-------------------------------------------------------------------
+
+-record(transition, { utc_offset :: integer()
+		    , is_dst :: boolean()
+		    , abbrev :: [binary()]
+		    , standard_or_wallclock :: standard | wall_clock
+		    , utc_or_local :: utc | local
+		    }).
+
+-record(tzfile, { transition_times :: [integer()]
+	      }).
+
+main([_ZoneinfoRoot, OutputFilename]) ->    
+    try
+	{ok, OutputDevice} = file:open(OutputFilename, [write]),
+	write_module_header(OutputDevice, OutputFilename),
+	#tzfile{} = read_tzfile("/usr/share/zoneinfo/Atlantic/Reykjavik")
+    catch exit:{badmatch, {error, Reason}} ->
+	    io:format(standard_error, "Unable to open file: ~s~n", [Reason]),
+	    halt(1);
+	  throw:{error, Reason} ->
+	    io:format(standard_error, "Unable to parse file: ~s", [Reason]),
+	    halt(1)	    
+    end;
+main(_) ->
+    io:format("Usage: ~s <zoneinfo root> <output source>~n", [escript:script_name()]),
+    io:format("Example: ~s /usr/share/zoneinfo time_tz.erl~n", [escript:script_name()]),
+    halt(1).
+
+-spec read_tzfile(file:name_all()) -> #tzfile{}.
+read_tzfile(Filename) ->
+    %% The zoneinfo files are just a few kilobytes tops each.
+    case file:read_file(Filename) of
+	{ok, Binary} ->
+	    parse_tzfile(Binary);
+	{error, _}=E ->
+	    error(E)
+    end.
+
+-spec parse_tzfile(binary()) -> #tzfile{}.
+parse_tzfile(<<"TZif",
+	       Version:8/integer, %% The version, 0x0 or 0x32.
+	       _:15/binary, %% Padding
+	       IsGmtCnt:4/big-signed-integer-unit:8,
+	       IsStdCnt:4/big-signed-integer-unit:8,
+	       LeapCnt:4/big-signed-integer-unit:8,
+	       TransitionTimeCount:4/big-signed-integer-unit:8, %% tzh_timecnt
+	       TypeCnt:4/big-signed-integer-unit:8,
+	       CharCnt:4/big-signed-integer-unit:8,
+	       Bin/binary>>) ->
+    
+    {TransitionTimes, Bin1} = parse_transition_times(Bin, TransitionTimeCount),
+    {TransitionTimesIdx, Bin2} = parse_transition_time_type(Bin1, TransitionTimeCount),
+    {TTInfos, Bin3} = parse_ttinfo(Bin2, TypeCnt),
+    {AbbrevChars, Bin4} = parse_abbrev(Bin3, CharCnt),
+    {LeapSeconds, Bin5} = parse_leap_seconds(Bin4, LeapCnt),
+    {StdWall, Bin6} = parse_indicators(Bin5, IsStdCnt),
+    {UtcLocal, <<>>} = parse_indicators(Bin6, IsGmtCnt), %% Match with <<>>; as we should be done with the binary
+
+    Transitions = lists:zipwith3(fun({UtcOffset, IsDST, AbbrevIdx}, IsStdWall, IsUtcLocal) ->
+					 #transition{ utc_offset=UtcOffset
+						    , is_dst=IsDST
+						    , abbrev=Abbrev
+						    },
+					     {Time, lists:nth(InfoIdx+1, TTInfos)}
+				 end, 
+				 TTInfos, StdWall, UtcLocal),
+    
+    io:format("Transitions: ~p~n", [Transitions]),
+    io:format("IsGmtCnt: ~p; IsStdCnt: ~p; TypeCnt: ~p", [IsGmtCnt, IsStdCnt, TypeCnt]),
+
+    #tzfile{};
+parse_tzfile(_) ->
+    throw({error, invalid_magic}).
+
+-spec parse_leap_seconds(binary(), non_neg_integer()) -> [{integer(), integer()}].
+parse_leap_seconds(Bin, Count) ->
+    parse_leap_seconds(Bin, Count, []).
+
+parse_leap_seconds(Bin, 0, Acc) ->
+    {lists:reverse(Acc), Bin};
+parse_leap_seconds(<<At:4/big-signed-integer-unit:8, 
+		     Total:4/big-signed-integer-unit:8, 
+		     Rest/binary>>,
+		   Count, Acc) ->
+    parse_leap_seconds(Rest, Count-1, [{At, Total} | Acc]).
+
+%% @doc
+%% Parse the ttinfo structures from binary
+%% @end
+-spec parse_ttinfo(binary(), non_neg_integer()) -> [{integer(), boolean(), integer()}].
+parse_ttinfo(Binary, Count) ->
+    parse_ttinfo(Binary, Count, []).
+
+parse_ttinfo(Binary, 0, Acc) ->
+    {lists:reverse(Acc), Binary};
+parse_ttinfo(<<UtcOffset:4/big-signed-integer-unit:8,
+	       IsDST:1/big-signed-integer-unit:8,
+	       AbbrevIdx:1/big-unsigned-integer-unit:8,
+	       Rest/binary>>,
+	     Count, Acc) when Count > 0 ->
+    TTInfo = {UtcOffset, int_to_bool(IsDST), AbbrevIdx},
+    parse_ttinfo(Rest, Count-1, [TTInfo | Acc]).
+
+int_to_bool(0) -> false;
+int_to_bool(_) -> true.
+
+-spec parse_abbrev(binary(), non_neg_integer()) -> {binary(), binary()}.
+parse_abbrev(Bin, Count) ->
+    %% The abbrevations are a chunk of null-terminated strings of length Count.
+    <<AbbrevChars:Count/binary, Rest/binary>> = Bin,
+    {AbbrevChars, Rest}.
+
+parse_indicators(Bin, Count) ->
+    parse_indicators(Bin, Count, []).
+
+parse_indicators(Bin, 0, Acc) ->
+    {lists:reverse(Acc), Bin};
+parse_indicators(<<Int, Rest/binary>>, Count, Acc) ->
+    parse_indicators(Rest, Count-1, [int_to_bool(Int) | Acc]).
+
+%% @doc
+%% Read and parse the transition times from binary
+%% @end
+-spec parse_transition_times(binary(), non_neg_integer()) -> [integer()].
+parse_transition_times(Bin, Count) ->
+    parse_transition_times(Bin, Count, []).
+
+parse_transition_times(Binary, 0, Acc) ->
+    {lists:reverse(Acc), Binary};
+parse_transition_times(<<TransitionTime:4/big-signed-integer-unit:8, Rest/binary>>, Count, Acc) when Count > 0 ->
+    parse_transition_times(Rest, Count-1, [TransitionTime | Acc]).
+
+%% @doc
+%% Read and parse the transition time types from binary
+%% @end
+-spec parse_transition_time_type(binary(), non_neg_integer()) -> [integer()].
+parse_transition_time_type(Binary, Count) ->
+    parse_transition_time_type(Binary, Count, []).
+
+parse_transition_time_type(Binary, 0, Acc) ->
+    {lists:reverse(Acc), Binary};
+parse_transition_time_type(<<Char:8, Rest/binary>>, Count, Acc) when Count > 0 ->
+    parse_transition_time_type(Rest, Count-1, [Char | Acc]).
+
+-spec write_module_header(file:io_device(), file:name_all()) -> ok.
+write_module_header(IoDevice, Filename) ->
+    Basename = filename:basename(Filename),
+    ModuleName = Basename -- filename:extension(Filename),
+
+    ok = io:format(IoDevice, "%%%-------------------------------------------------------------------~n", []),
+    ok = io:format(IoDevice, "%%% @author SÃ¶lvi PÃ¡ll Ãsgeirsson <solvip@gmail.com>~n", []),
+    ok = io:format(IoDevice, "%%% @copyright (C) 2016, SÃ¶lvi PÃ¡ll Ãsgeirsson~n", []),
+    ok = io:format(IoDevice, "%%%~n", []),
+    ok = io:format(IoDevice, "%%% Licensed under the Apache License, Version 2.0 (the \"License\");~n", []),
+    ok = io:format(IoDevice, "%%% you may not use this file except in compliance with the License.~n", []),
+    ok = io:format(IoDevice, "%%% You may obtain a copy of the License at~n", []),
+    ok = io:format(IoDevice, "%%%~n", []),
+    ok = io:format(IoDevice, "%%%     http://www.apache.org/licenses/LICENSE-2.0~n", []),
+    ok = io:format(IoDevice, "%%%~n", []),
+    ok = io:format(IoDevice, "%%% Unless required by applicable law or agreed to in writing, software~n", []),
+    ok = io:format(IoDevice, "%%% distributed under the License is distributed on an \"AS IS\" BASIS,~n", []),
+    ok = io:format(IoDevice, "%%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.~n", []),
+    ok = io:format(IoDevice, "%%% See the License for the specific language governing permissions and~n", []),
+    ok = io:format(IoDevice, "%%% limitations under the License.~n", []),
+    ok = io:format(IoDevice, "%%%~n", []),
+    ok = io:format(IoDevice, "%%%-------------------------------------------------------------------~n", []),
+    ok = io:format(IoDevice, "~n", []),
+    ok = io:format(IoDevice, "-module(~s).~n", [ModuleName]),
+    ok = io:format(IoDevice, "~n", []),
+    ok = io:format(IoDevice, "-export([ offset/1]).~n", []),
+    ok = io:format(IoDevice, "~n", []).
